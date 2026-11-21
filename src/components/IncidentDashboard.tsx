@@ -28,6 +28,7 @@ interface IncidentData {
   status: string;
   state: SimState;
   lastTick: number;
+  isHost?: boolean;
 }
 
 async function callBackend<T>(
@@ -72,6 +73,8 @@ export default function IncidentDashboard() {
     null
   );
   const [loading, setLoading] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+const [joining, setJoining] = useState(false);
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState<string[]>([]);
 
@@ -125,6 +128,39 @@ export default function IncidentDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+  if (!incidentId) return;
+
+  let stopped = false;
+  let inFlight = false;
+
+  const interval = setInterval(async () => {
+    if (stopped || inFlight) return;
+
+    inFlight = true;
+
+    try {
+      const latest = await callBackend<IncidentData>(
+        "getIncident",
+        { incidentId }
+      );
+
+      if (!stopped) {
+        setIncident(latest);
+      }
+    } catch (error) {
+      console.error("Incident synchronization failed:", error);
+    } finally {
+      inFlight = false;
+    }
+  }, 2000);
+
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}, [incidentId]);
+
   async function createIncident() {
     setLoading(true);
     setMessage("");
@@ -153,6 +189,80 @@ export default function IncidentDashboard() {
     }
   }
 
+  async function testCreateWarRoom() {
+    if (!incidentId ||  loading) return;
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+    const result = await callBackend<{
+      incidentId: string;
+      roomCode: string;
+      memberCount: number;
+    }>("createWarRoom", {
+      incidentId,
+    });
+
+    setMessage(
+      `War Room created! Code: ${result.roomCode} | Members: ${result.memberCount}`
+    );
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to create War Room."
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+  
+
+async function joinWarRoom() {
+  if (!joinCode.trim() || joining) return;
+
+  setJoining(true);
+  setMessage("");
+
+  try {
+    const result = await callBackend<{
+      incidentId: string;
+      title: string;
+      memberCount: number;
+      joined: boolean;
+    }>("joinWarRoom", {
+      roomCode: joinCode.trim(),
+    });
+
+    
+await loadIncident(result.incidentId);
+
+localStorage.setItem(
+  STORAGE_KEY,
+  result.incidentId
+);
+
+setHistory([]);
+
+setMessage(
+  `Joined War Room! ${result.title} | Members: ${result.memberCount}`
+);
+
+setJoinCode("");
+
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to join War Room."
+    );
+  } finally {
+    setJoining(false);
+  }
+}
+
+
   async function advanceIncident() {
     if (!incidentId || loading) return;
 
@@ -160,9 +270,12 @@ export default function IncidentDashboard() {
     setMessage("");
 
     try {
-      await callBackend("advanceIncident", {
-        incidentId,
-      });
+      
+await callBackend("advanceIncident", {
+  incidentId,
+  expectedTick: incident?.state.tick,
+});
+
 
       await loadIncident(incidentId);
 
@@ -191,6 +304,7 @@ export default function IncidentDashboard() {
       await callBackend("applyMitigation", {
         incidentId,
         actionType,
+        expectedTick: incident?.state.tick,
       });
 
       await loadIncident(incidentId);
@@ -214,6 +328,7 @@ export default function IncidentDashboard() {
 
   const state = incident?.state;
   const resolved = incident?.status === "resolved";
+  const isHost = incident?.isHost === true;
 
   return (
     <main className="min-h-screen bg-[#080d18] p-6 text-white">
@@ -363,10 +478,19 @@ export default function IncidentDashboard() {
                   Incident Controls
                 </h2>
 
+
+<p className="mb-4 text-sm text-slate-400">
+  Your role:{" "}
+  <span className="font-semibold text-cyan-400">
+    {isHost ? "Host" : "Participant"}
+  </span>
+</p>
+
+
                 <div className="flex flex-wrap gap-3">
                   <button
                     onClick={advanceIncident}
-                    disabled={loading || resolved}
+                    disabled = {loading || resolved || !isHost}
                     className="rounded-lg bg-cyan-600 px-4 py-3 font-medium disabled:opacity-40"
                   >
                     Advance Tick
@@ -374,7 +498,9 @@ export default function IncidentDashboard() {
 
                   <button
                     onClick={() => applyMitigation("restart")}
-                    disabled={loading || resolved}
+                    
+                    disabled={loading || resolved || !isHost}
+
                     className="rounded-lg bg-red-700 px-4 py-3 font-medium disabled:opacity-40"
                   >
                     Restart Database
@@ -382,7 +508,9 @@ export default function IncidentDashboard() {
 
                   <button
                     onClick={() => applyMitigation("raise_pool_size")}
-                    disabled={loading || resolved}
+                    
+                    disabled={loading || resolved || !isHost}
+
                     className="rounded-lg bg-emerald-700 px-4 py-3 font-medium disabled:opacity-40"
                   >
                     Raise Pool Size
@@ -390,7 +518,9 @@ export default function IncidentDashboard() {
 
                   <button
                     onClick={() => applyMitigation("rollback_deploy")}
-                    disabled={loading || resolved}
+                    
+                    disabled={loading || resolved || !isHost}
+
                     className="rounded-lg bg-violet-700 px-4 py-3 font-medium disabled:opacity-40"
                   >
                     Roll Back Deploy
@@ -403,7 +533,37 @@ export default function IncidentDashboard() {
                   >
                     New Incident
                   </button>
+
+                  <button
+  onClick={testCreateWarRoom}
+  disabled={loading}
+  className="rounded-lg bg-indigo-600 px-4 py-3 font-medium disabled:opacity-40"
+>
+  Create War Room
+</button>
                 </div>
+
+
+<div className="mt-4 flex flex-wrap gap-3">
+  <input
+    type="text"
+    value={joinCode}
+    onChange={(e) => setJoinCode(e.target.value)}
+    placeholder="Enter War Room invitation code"
+    aria-label="War Room invitation code"
+    maxLength={32}
+    className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-white"
+  />
+
+  <button
+    onClick={joinWarRoom}
+    disabled={joining || joinCode.trim().length !== 32}
+    className="rounded-lg bg-indigo-600 px-4 py-3 font-medium text-white disabled:opacity-40"
+  >
+    {joining ? "Joining..." : "Join War Room"}
+  </button>
+</div>
+
 
                 <p className="mt-4 text-sm text-slate-400">
                   All actions are validated and processed

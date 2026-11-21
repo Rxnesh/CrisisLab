@@ -40,6 +40,17 @@ export const incidentsSchema: CollectionSchema = {
       storage: "number",
       interpretation: "plain",
     },
+
+    {
+  name: "roomCode",
+  storage: "text",
+  interpretation: "plain",
+},
+{
+  name: "memberIds",
+  storage: "text",
+  interpretation: { kind: "json" },
+},
   ],
 
   permissions: {

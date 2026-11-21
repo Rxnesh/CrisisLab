@@ -109,13 +109,16 @@ export const actions: Record<string, ActionHandler<Env>> = {
       };
     }
 
-    const result = await tools.get<{
-      ownerId: string;
-      title: string;
-      status: string;
-      state: Record<string, unknown>;
-      lastTick: number;
-    }>("incidents", incidentId);
+    
+  const result = await tools.get<{
+  ownerId: string;
+  memberIds?: string[];
+  title: string;
+  status: string;
+  state: Record<string, unknown>;
+  lastTick: number;
+}>("incidents", incidentId);
+
 
     if (!result.success) {
       return {
@@ -126,12 +129,20 @@ export const actions: Record<string, ActionHandler<Env>> = {
 
     const incident = result.data.record.data;
 
-    if (incident.ownerId !== userId) {
-      return {
-        success: false,
-        error: "Access denied",
-      };
-    }
+    
+const isOwner = incident.ownerId === userId;
+
+const isMember =
+  Array.isArray(incident.memberIds) &&
+  incident.memberIds.includes(userId);
+
+if (!isOwner && !isMember) {
+  return {
+    success: false,
+    error: "Access denied",
+  };
+}
+
 
     return {
       success: true,
@@ -141,6 +152,7 @@ export const actions: Record<string, ActionHandler<Env>> = {
         status: incident.status,
         state: incident.state,
         lastTick: incident.lastTick,
+        isHost: incident.ownerId === userId,
       },
     };
   },
@@ -200,6 +212,28 @@ export const actions: Record<string, ActionHandler<Env>> = {
         error: "Incident is no longer active",
       };
     }
+
+
+const expectedTick = params.expectedTick;
+
+if (
+  typeof expectedTick !== "number" ||
+  !Number.isInteger(expectedTick) ||
+  expectedTick < 0
+) {
+  return {
+    success: false,
+    error: "Valid expected tick required",
+  };
+}
+
+if (incident.state.tick !== expectedTick) {
+  return {
+    success: false,
+    error: "Incident changed. Refresh and try again.",
+  };
+}
+
 
     // Run one simulation tick on the server.
     const nextState = step(
@@ -315,6 +349,32 @@ export const actions: Record<string, ActionHandler<Env>> = {
       };
     }
 
+
+const expectedTick = params.expectedTick;
+
+if (
+  typeof expectedTick !== "number" ||
+  !Number.isInteger(expectedTick) ||
+  expectedTick < 0
+) {
+  return {
+    success: false,
+    error: "Valid expected tick required",
+  };
+}
+
+if (incident.state.tick !== expectedTick) {
+  return {
+    success: false,
+    error: "Incident changed. Refresh and try again.",
+  };
+}
+
+
+
+
+
+
     const target =
       actionType === "rollback_deploy" ? "api" : "db";
 
@@ -368,6 +428,174 @@ export const actions: Record<string, ActionHandler<Env>> = {
         impact: nextState.impact,
         mitigation: nextState.mitigation,
         resolvedAtTick: nextState.resolvedAtTick,
+      },
+    };
+  },
+
+
+
+  // Create a private multiplayer War Room
+  createWarRoom: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const incidentId = params.incidentId;
+
+    if (
+      typeof incidentId !== "string" ||
+      incidentId.length === 0
+    ) {
+      return {
+        success: false,
+        error: "Valid incident ID required",
+      };
+    }
+
+    const result = await tools.get<{
+      ownerId: string;
+      roomCode?: string;
+      memberIds?: string[];
+    }>("incidents", incidentId);
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    const incident = result.data.record.data;
+
+    // Only the incident owner can create the room.
+    if (incident.ownerId !== userId) {
+      return {
+        success: false,
+        error: "Access denied",
+      };
+    }
+
+    // Reuse an existing invitation if one was created.
+    const roomCode =
+      incident.roomCode ||
+      crypto.randomUUID().replace(/-/g, "");
+
+    const memberIds = Array.from(
+      new Set([...(incident.memberIds ?? []), userId])
+    );
+
+    const updated = await tools.update(
+      "incidents",
+      incidentId,
+      {
+        roomCode,
+        memberIds,
+      }
+    );
+
+    if (!updated.success) {
+      return {
+        success: false,
+        error: updated.error,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        incidentId,
+        roomCode,
+        memberCount: memberIds.length,
+      },
+    };
+  },
+
+
+
+  // Join an existing multiplayer War Room
+  joinWarRoom: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const roomCode = params.roomCode;
+
+    if (
+      typeof roomCode !== "string" ||
+      !/^[a-f0-9]{32}$/.test(roomCode)
+    ) {
+      return {
+        success: false,
+        error: "Invalid invitation code",
+      };
+    }
+
+    // Find the incident with this invitation code.
+    const found = await tools.query<{
+      ownerId: string;
+      roomCode?: string;
+      memberIds?: string[];
+      title: string;
+    }>("incidents", {
+      where: { roomCode },
+      limit: 2,
+    });
+
+    if (!found.success) {
+      return {
+        success: false,
+        error: "Unable to find War Room",
+      };
+    }
+
+    if (found.data.records.length !== 1) {
+      return {
+        success: false,
+        error: "Invalid or unavailable War Room",
+      };
+    }
+
+    const record = found.data.records[0];
+    const incident = record.data;
+    const incidentId = record.recordId;
+
+    // Add the verified user without duplicating members.
+    const memberIds = Array.from(
+      new Set([
+        incident.ownerId,
+        ...(Array.isArray(incident.memberIds)
+          ? incident.memberIds
+          : []),
+        userId,
+      ])
+    );
+
+    const updated = await tools.update(
+      "incidents",
+      incidentId,
+      { memberIds }
+    );
+
+    if (!updated.success) {
+      return {
+        success: false,
+        error: "Failed to join War Room",
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        incidentId,
+        title: incident.title,
+        memberCount: memberIds.length,
+        joined: true,
       },
     };
   },
