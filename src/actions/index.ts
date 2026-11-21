@@ -599,6 +599,274 @@ if (incident.state.tick !== expectedTick) {
       },
     };
   },
+
+
+  // Submit a mitigation request from a War Room member
+  requestMitigation: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const incidentId = params.incidentId;
+    const actionType = params.actionType;
+
+    if (
+      typeof incidentId !== "string" ||
+      !incidentId.trim()
+    ) {
+      return {
+        success: false,
+        error: "Valid incident ID required",
+      };
+    }
+
+    const allowedActions = [
+      "restart",
+      "raise_pool_size",
+      "rollback_deploy",
+    ];
+
+    if (
+      typeof actionType !== "string" ||
+      !allowedActions.includes(actionType)
+    ) {
+      return {
+        success: false,
+        error: "Invalid mitigation action",
+      };
+    }
+
+    const result = await tools.get<{
+      ownerId: string;
+      memberIds?: string[];
+      roomCode?: string;
+      status: string;
+    }>("incidents", incidentId);
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    const incident = result.data.record.data;
+
+    const isMember =
+      incident.ownerId === userId ||
+      (Array.isArray(incident.memberIds) &&
+        incident.memberIds.includes(userId));
+
+    if (!incident.roomCode || !isMember) {
+      return {
+        success: false,
+        error: "You are not a member of this War Room",
+      };
+    }
+
+    if (incident.status !== "active") {
+      return {
+        success: false,
+        error: "Incident is no longer active",
+      };
+    }
+
+    const created = await tools.create(
+      "mitigationRequests",
+      {
+        incidentId,
+        requestedBy: userId,
+        actionType,
+        status: "pending",
+        createdAt: new Date().toISOString(),
+      }
+    );
+
+    if (!created.success) {
+      return {
+        success: false,
+        error: created.error,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        requestId: created.data.recordId,
+        actionType,
+        status: "pending",
+      },
+    };
+  },
+
+  
+  // Retrieve pending mitigation requests for the incident host
+  getMitigationRequests: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const incidentId = params.incidentId;
+
+    if (
+      typeof incidentId !== "string" ||
+      !incidentId.trim()
+    ) {
+      return {
+        success: false,
+        error: "Valid incident ID required",
+      };
+    }
+
+    const found = await tools.get<{
+      ownerId: string;
+    }>("incidents", incidentId);
+
+    if (!found.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    if (found.data.record.data.ownerId !== userId) {
+      return {
+        success: false,
+        error: "Only the incident host can view requests",
+      };
+    }
+
+    const requests = await tools.query<{
+      incidentId: string;
+      requestedBy: string;
+      actionType: string;
+      status: string;
+      createdAt: string;
+    }>("mitigationRequests", {
+      where: {
+        incidentId,
+        status: "pending",
+      },
+      limit: 100,
+    });
+
+    if (!requests.success) {
+      return {
+        success: false,
+        error: "Unable to load mitigation requests",
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        requests: requests.data.records.map((record) => ({
+          requestId: record.recordId,
+          requestedBy: record.data.requestedBy,
+          actionType: record.data.actionType,
+          status: record.data.status,
+          createdAt: record.data.createdAt,
+        })),
+      },
+    };
+  },
+
+
+  // Allow the incident host to reject a mitigation request
+  rejectMitigationRequest: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const requestId = params.requestId;
+
+    if (
+      typeof requestId !== "string" ||
+      !requestId.trim()
+    ) {
+      return {
+        success: false,
+        error: "Valid request ID required",
+      };
+    }
+
+    const requestResult = await tools.get<{
+      incidentId: string;
+      requestedBy: string;
+      actionType: string;
+      status: string;
+    }>("mitigationRequests", requestId);
+
+    if (!requestResult.success) {
+      return {
+        success: false,
+        error: "Mitigation request not found",
+      };
+    }
+
+    const request = requestResult.data.record.data;
+
+    const incidentResult = await tools.get<{
+      ownerId: string;
+    }>("incidents", request.incidentId);
+
+    if (!incidentResult.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    if (incidentResult.data.record.data.ownerId !== userId) {
+      return {
+        success: false,
+        error: "Only the host can reject requests",
+      };
+    }
+
+    if (request.status !== "pending") {
+      return {
+        success: false,
+        error: "Request has already been processed",
+      };
+    }
+
+    const updated = await tools.update(
+      "mitigationRequests",
+      requestId,
+      {
+        status: "rejected",
+      }
+    );
+
+    if (!updated.success) {
+      return {
+        success: false,
+        error: "Failed to reject mitigation request",
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        requestId,
+        status: "rejected",
+      },
+    };
+  },
+
+
+
+
 };
 
 

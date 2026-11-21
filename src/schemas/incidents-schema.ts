@@ -51,8 +51,13 @@ export const incidentsSchema: CollectionSchema = {
   storage: "text",
   interpretation: { kind: "json" },
 },
-  ],
 
+{
+  name: "mitigationRequests",
+  storage: "text",
+  interpretation: { kind: "json" },
+},
+  ],
   permissions: {
     "*": {
       read: false,

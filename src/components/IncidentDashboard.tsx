@@ -31,6 +31,16 @@ interface IncidentData {
   isHost?: boolean;
 }
 
+interface MitigationRequest {
+  requestId: string;
+  requestedBy: string;
+  actionType: string;
+  status: string;
+  createdAt: string;
+}
+
+
+
 async function callBackend<T>(
   action: string,
   params: Record<string, unknown> = {}
@@ -77,6 +87,10 @@ export default function IncidentDashboard() {
 const [joining, setJoining] = useState(false);
   const [message, setMessage] = useState("");
   const [history, setHistory] = useState<string[]>([]);
+  const [mitigationRequests, setMitigationRequests] = useState<
+  MitigationRequest[]
+>([]);
+
 
   async function loadIncident(id: string) {
     const data = await callBackend<IncidentData>(
@@ -160,6 +174,58 @@ const [joining, setJoining] = useState(false);
     clearInterval(interval);
   };
 }, [incidentId]);
+
+
+
+
+useEffect(() => {
+  if (!incidentId || incident?.isHost !== true) {
+    setMitigationRequests([]);
+    return;
+  }
+
+  let stopped = false;
+  let inFlight = false;
+
+  async function loadRequests() {
+    if (inFlight) return;
+
+    inFlight = true;
+
+    try {
+      const result = await callBackend<{
+        requests: MitigationRequest[];
+      }>("getMitigationRequests", {
+        incidentId,
+      });
+
+      if (!stopped) {
+        setMitigationRequests(result.requests);
+      }
+    } catch (error) {
+      if (!stopped) {
+        console.error(
+          "Failed to load mitigation requests:",
+          error
+        );
+      }
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  void loadRequests();
+
+  const interval = setInterval(() => {
+    void loadRequests();
+  }, 2000);
+
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}, [incidentId, incident?.isHost]);
+
 
   async function createIncident() {
     setLoading(true);
@@ -325,6 +391,74 @@ await callBackend("advanceIncident", {
       setLoading(false);
     }
   }
+
+
+async function requestMitigation(actionType: ActionType) {
+  if (!incidentId || loading || incident?.isHost !== false) return;
+
+  setLoading(true);
+  setMessage("");
+
+  try {
+    const result = await callBackend<{
+      requestId: string;
+      actionType: string;
+      status: string;
+    }>("requestMitigation", {
+      incidentId,
+      actionType,
+    });
+
+    setMessage(
+      `Mitigation request submitted: ${result.actionType}. Waiting for host approval.`
+    );
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to submit mitigation request."
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+
+
+async function rejectMitigationRequest(requestId: string) {
+  if (!incidentId || loading || incident?.isHost !== true) return;
+
+  setLoading(true);
+  setMessage("");
+
+  try {
+    await callBackend<{
+      requestId: string;
+      status: string;
+    }>("rejectMitigationRequest", {
+      requestId,
+    });
+
+    setMitigationRequests((previous) =>
+      previous.filter(
+        (request) => request.requestId !== requestId
+      )
+    );
+
+    setMessage("Mitigation request rejected.");
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to reject mitigation request."
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+
+
 
   const state = incident?.state;
   const resolved = incident?.status === "resolved";
@@ -544,6 +678,46 @@ await callBackend("advanceIncident", {
                 </div>
 
 
+{!isHost && !resolved && (
+  <div className="mt-4 rounded-lg border border-cyan-800 bg-slate-950 p-4">
+    <h3 className="mb-2 font-semibold text-cyan-300">
+      Request Mitigation
+    </h3>
+
+    <p className="mb-4 text-sm text-slate-400">
+      Suggest a repair for the host to review.
+    </p>
+
+    <div className="flex flex-wrap gap-3">
+      <button
+        onClick={() => requestMitigation("restart")}
+        disabled={loading}
+        className="rounded-lg bg-red-700 px-4 py-3 font-medium disabled:opacity-40"
+      >
+        Request Database Restart
+      </button>
+
+      <button
+        onClick={() => requestMitigation("raise_pool_size")}
+        disabled={loading}
+        className="rounded-lg bg-emerald-700 px-4 py-3 font-medium disabled:opacity-40"
+      >
+        Request Pool Increase
+      </button>
+
+      <button
+        onClick={() => requestMitigation("rollback_deploy")}
+        disabled={loading}
+        className="rounded-lg bg-violet-700 px-4 py-3 font-medium disabled:opacity-40"
+      >
+        Request Deployment Rollback
+      </button>
+    </div>
+  </div>
+)}
+
+
+
 <div className="mt-4 flex flex-wrap gap-3">
   <input
     type="text"
@@ -594,6 +768,62 @@ await callBackend("advanceIncident", {
                 )}
               </div>
             </section>
+
+
+
+{isHost && (
+  <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
+    <h2 className="mb-4 text-xl font-semibold">
+      Pending Mitigation Requests
+    </h2>
+
+    {mitigationRequests.length === 0 ? (
+      <p className="text-sm text-slate-400">
+        No pending mitigation requests.
+      </p>
+    ) : (
+      <div className="space-y-3">
+        {mitigationRequests.map((request) => (
+          <div
+            key={request.requestId}
+            className="rounded-lg border border-slate-700 bg-slate-950 p-4"
+          >
+            <p className="font-semibold text-cyan-300">
+              {request.actionType.replace(/_/g, " ")}
+            </p>
+
+            <p className="mt-2 text-sm text-slate-400">
+              Requested by: {request.requestedBy}
+            </p>
+
+            <p className="mt-1 text-sm text-slate-400">
+              Status: {request.status}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Submitted:{" "}
+              {new Date(request.createdAt).toLocaleString()}
+            </p>
+
+              
+              <button
+              onClick={() => rejectMitigationRequest(request.requestId)}
+             disabled={loading}
+             className="mt-3 rounded-lg bg-red-700 px-4 py-2 font-medium text-white disabled:opacity-40"
+>
+  Reject Request
+</button>
+
+
+
+          </div>
+        ))}
+      </div>
+    )}
+  </section>
+)}
+
+
 
             {resolved && (
               <section className="rounded-xl border border-emerald-600 bg-emerald-950 p-5">
