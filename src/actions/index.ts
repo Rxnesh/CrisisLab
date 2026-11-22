@@ -742,19 +742,20 @@ if (incident.state.tick !== expectedTick) {
       };
     }
 
-    const requests = await tools.query<{
-      incidentId: string;
-      requestedBy: string;
-      actionType: string;
-      status: string;
-      createdAt: string;
-    }>("mitigationRequests", {
-      where: {
-        incidentId,
-        status: "pending",
-      },
-      limit: 100,
-    });
+    
+const requests = await tools.query<{
+  incidentId: string;
+  requestedBy: string;
+  actionType: string;
+  status: string;
+  createdAt: string;
+}>("mitigationRequests", {
+  where: {
+    incidentId,
+  },
+  limit: 100,
+});
+
 
     if (!requests.success) {
       return {
@@ -864,6 +865,276 @@ if (incident.state.tick !== expectedTick) {
     };
   },
 
+
+  // Host approves a request without executing the mitigation yet
+  approveMitigationRequest: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const requestId = params.requestId;
+
+    if (
+      typeof requestId !== "string" ||
+      !requestId.trim()
+    ) {
+      return {
+        success: false,
+        error: "Valid request ID required",
+      };
+    }
+
+    const requestResult = await tools.get<{
+      incidentId: string;
+      actionType: string;
+      status: string;
+    }>("mitigationRequests", requestId);
+
+    if (!requestResult.success) {
+      return {
+        success: false,
+        error: "Mitigation request not found",
+      };
+    }
+
+    const request = requestResult.data.record.data;
+
+    const incidentResult = await tools.get<{
+      ownerId: string;
+      status: string;
+    }>("incidents", request.incidentId);
+
+    if (!incidentResult.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    const incident = incidentResult.data.record.data;
+
+    if (incident.ownerId !== userId) {
+      return {
+        success: false,
+        error: "Only the Host can approve requests",
+      };
+    }
+
+    if (incident.status !== "active") {
+      return {
+        success: false,
+        error: "Incident is no longer active",
+      };
+    }
+
+    if (request.status !== "pending") {
+      return {
+        success: false,
+        error: "Request has already been processed",
+      };
+    }
+
+    const updated = await tools.update(
+      "mitigationRequests",
+      requestId,
+      {
+        status: "approved",
+      }
+    );
+
+    if (!updated.success) {
+      return {
+        success: false,
+        error: "Failed to approve mitigation request",
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        requestId,
+        actionType: request.actionType,
+        status: "approved",
+      },
+    };
+  },
+
+
+
+  // Execute an approved mitigation request
+  executeApprovedMitigation: async ({ userId, params, tools }) => {
+    if (!userId) {
+      return {
+        success: false,
+        error: "Authentication required",
+      };
+    }
+
+    const requestId = params.requestId;
+    const expectedTick = params.expectedTick;
+
+    if (typeof requestId !== "string" || !requestId.trim()) {
+      return {
+        success: false,
+        error: "Valid request ID required",
+      };
+    }
+
+    if (
+      typeof expectedTick !== "number" ||
+      !Number.isInteger(expectedTick) ||
+      expectedTick < 0
+    ) {
+      return {
+        success: false,
+        error: "Valid expected tick required",
+      };
+    }
+
+    const requestResult = await tools.get<{
+      incidentId: string;
+      actionType: string;
+      status: string;
+    }>("mitigationRequests", requestId);
+
+    if (!requestResult.success) {
+      return {
+        success: false,
+        error: "Mitigation request not found",
+      };
+    }
+
+    const request = requestResult.data.record.data;
+
+    if (
+      request.status !== "approved" ||
+      (request.actionType !== "restart" &&
+        request.actionType !== "raise_pool_size" &&
+        request.actionType !== "rollback_deploy")
+    ) {
+      return {
+        success: false,
+        error: "Request is not approved or action is invalid",
+      };
+    }
+
+    const incidentResult = await tools.get<{
+      ownerId: string;
+      status: string;
+      scenario: Scenario;
+      state: ReturnType<typeof initialState>;
+    }>("incidents", request.incidentId);
+
+    if (!incidentResult.success) {
+      return {
+        success: false,
+        error: "Incident not found",
+      };
+    }
+
+    const incident = incidentResult.data.record.data;
+
+    if (incident.ownerId !== userId) {
+      return {
+        success: false,
+        error: "Only the Host can execute mitigations",
+      };
+    }
+
+    if (incident.status !== "active") {
+      return {
+        success: false,
+        error: "Incident is no longer active",
+      };
+    }
+
+    if (incident.state.tick !== expectedTick) {
+      return {
+        success: false,
+        error: "Incident changed. Refresh and try again.",
+      };
+    }
+
+    // Record that execution has begun.
+    const claimed = await tools.update(
+      "mitigationRequests",
+      requestId,
+      { status: "executing" }
+    );
+
+    if (!claimed.success) {
+      return {
+        success: false,
+        error: "Failed to begin mitigation execution",
+      };
+    }
+
+    const target =
+      request.actionType === "rollback_deploy" ? "api" : "db";
+
+    const nextState = step(
+      incident.state,
+      incident.scenario,
+      [
+        {
+          tick: incident.state.tick + 1,
+          actorId: userId,
+          type: request.actionType,
+          target,
+        },
+      ]
+    );
+
+    const status =
+      nextState.resolvedAtTick !== undefined
+        ? "resolved"
+        : nextState.failed
+          ? "failed"
+          : "active";
+
+    const updated = await tools.update(
+      "incidents",
+      request.incidentId,
+      {
+        state: nextState,
+        lastTick: nextState.tick,
+        status,
+      }
+    );
+
+    if (!updated.success) {
+      return {
+        success: false,
+        error: "Incident update failed. Request needs review.",
+      };
+    }
+
+    const completed = await tools.update(
+      "mitigationRequests",
+      requestId,
+      { status: "executed" }
+    );
+
+    if (!completed.success) {
+      return {
+        success: false,
+        error: "Incident updated, but request status needs review.",
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        requestId,
+        incidentId: request.incidentId,
+        status: "executed",
+        tick: nextState.tick,
+      },
+    };
+  },
 
 
 

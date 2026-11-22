@@ -460,6 +460,93 @@ async function rejectMitigationRequest(requestId: string) {
 
 
 
+async function approveMitigationRequest(requestId: string) {
+  if (!incidentId || loading || incident?.isHost !== true) return;
+
+  setLoading(true);
+  setMessage("");
+
+  try {
+    await callBackend<{
+      requestId: string;
+      actionType: string;
+      status: string;
+    }>("approveMitigationRequest", {
+      requestId,
+    });
+
+    setMitigationRequests((previous) =>
+      previous.filter(
+        (request) => request.requestId !== requestId
+      )
+    );
+
+    setMessage(
+      "Mitigation request approved. The repair has not been executed yet."
+    );
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to approve mitigation request."
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+
+
+async function executeApprovedMitigation(requestId: string) {
+  if (!incidentId || loading || incident?.isHost !== true) return;
+
+  setLoading(true);
+  setMessage("");
+
+  try {
+    const result = await callBackend<{
+      requestId: string;
+      incidentId: string;
+      status: string;
+      tick: number;
+    }>("executeApprovedMitigation", {
+      requestId,
+      expectedTick: incident.state.tick,
+    });
+
+    await loadIncident(result.incidentId);
+
+    setMitigationRequests((previous) =>
+      previous.filter(
+        (request) => request.requestId !== requestId
+      )
+    );
+
+    setHistory((previous) => [
+      `Approved mitigation executed at tick ${result.tick}.`,
+      ...previous,
+    ]);
+
+    setMessage(
+      `Mitigation executed successfully at tick ${result.tick}.`
+    );
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Failed to execute approved mitigation."
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+
+
+
+
   const state = incident?.state;
   const resolved = incident?.status === "resolved";
   const isHost = incident?.isHost === true;
@@ -777,13 +864,21 @@ async function rejectMitigationRequest(requestId: string) {
       Pending Mitigation Requests
     </h2>
 
-    {mitigationRequests.length === 0 ? (
+    
+{mitigationRequests.filter(
+  (request) => request.status === "pending"
+).length === 0 ? (
+
       <p className="text-sm text-slate-400">
         No pending mitigation requests.
       </p>
     ) : (
       <div className="space-y-3">
-        {mitigationRequests.map((request) => (
+        
+{mitigationRequests
+  .filter((request) => request.status === "pending")
+  .map((request) => (
+
           <div
             key={request.requestId}
             className="rounded-lg border border-slate-700 bg-slate-950 p-4"
@@ -807,6 +902,16 @@ async function rejectMitigationRequest(requestId: string) {
 
               
               <button
+              onClick={() => approveMitigationRequest(request.requestId)}
+              disabled={loading}
+              className="mt-3 mr-3 rounded-lg bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
+>
+              Approve Request
+              </button>
+
+
+
+              <button
               onClick={() => rejectMitigationRequest(request.requestId)}
              disabled={loading}
              className="mt-3 rounded-lg bg-red-700 px-4 py-2 font-medium text-white disabled:opacity-40"
@@ -818,6 +923,53 @@ async function rejectMitigationRequest(requestId: string) {
 
           </div>
         ))}
+      </div>
+    )}
+  </section>
+)}
+
+
+
+{isHost && (
+  <section className="rounded-xl border border-slate-800 bg-slate-900 p-5">
+    <h2 className="mb-4 text-xl font-semibold">
+      Approved Mitigation Requests
+    </h2>
+
+    {mitigationRequests.filter(
+      (request) => request.status === "approved"
+    ).length === 0 ? (
+      <p className="text-sm text-slate-400">
+        No approved mitigation requests.
+      </p>
+    ) : (
+      <div className="space-y-3">
+        {mitigationRequests
+          .filter((request) => request.status === "approved")
+          .map((request) => (
+            <div
+              key={request.requestId}
+              className="rounded-lg border border-slate-700 bg-slate-950 p-4"
+            >
+              <p className="font-semibold text-emerald-300">
+                {request.actionType.replace(/_/g, " ")}
+              </p>
+
+              <p className="mt-2 text-sm text-slate-400">
+                Approved — awaiting execution
+              </p>
+
+              <button
+                onClick={() =>
+                  executeApprovedMitigation(request.requestId)
+                }
+                disabled={loading || resolved}
+                className="mt-3 rounded-lg bg-emerald-700 px-4 py-2 font-medium text-white disabled:opacity-40"
+              >
+                {loading ? "Processing..." : "Execute Mitigation"}
+              </button>
+            </div>
+          ))}
       </div>
     )}
   </section>
